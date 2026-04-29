@@ -2062,6 +2062,13 @@ public class XServerDisplayActivity extends FixedFontScaleAppCompatActivity {
             handler.stop();
         } catch (Exception e) {
             Log.e("XServerDisplayActivity", "Failed to stop WinHandler from " + trigger, e);
+        } finally {
+            if (xServer != null && xServer.getWinHandler() == handler) {
+                xServer.setWinHandler(null);
+            }
+            if (winHandler == handler) {
+                winHandler = null;
+            }
         }
     }
 

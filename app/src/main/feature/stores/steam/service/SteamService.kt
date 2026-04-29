@@ -5087,6 +5087,7 @@ class SteamService :
             instance?.let { steamInstance ->
                 if (!isStopping) {
                     isStopping = true
+                    steamInstance.cancelBackgroundJobs()
                     runCatching {
                         steamInstance.stopForeground(Service.STOP_FOREGROUND_REMOVE)
                     }.onFailure { Timber.w(it, "Failed to remove SteamService foreground state during shutdown") }
@@ -5536,6 +5537,7 @@ class SteamService :
         stopForeground(STOP_FOREGROUND_REMOVE)
         notificationHelper.cancel()
 
+        cancelBackgroundJobs()
         if (!isStopping) {
             scope.launch { stop() }
         }
@@ -5609,6 +5611,7 @@ class SteamService :
             instance = null
         }
 
+        cancelBackgroundJobs()
         _loginResult = LoginResult.Failed
         isRunning = false
         isConnected = false
@@ -5635,6 +5638,15 @@ class SteamService :
         PluviaApp.events.clearAllListenersOf<SteamEvent<Any>>()
 
         LogManager.removeListener(logger)
+    }
+
+    private fun cancelBackgroundJobs() {
+        picsGetProductInfoJob?.cancel()
+        picsGetProductInfoJob = null
+        picsChangesCheckerJob?.cancel()
+        picsChangesCheckerJob = null
+        friendCheckerJob?.cancel()
+        friendCheckerJob = null
     }
 
     private fun reconnect() {

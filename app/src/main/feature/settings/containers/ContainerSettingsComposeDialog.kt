@@ -78,6 +78,7 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
     private val state = GameSettingsStateHolder()
     private val manager = ContainerManager(context)
     private val contentsManager = ContentsManager(context)
+    private var lifecycleObserver: DefaultLifecycleObserver? = null
     private var isArm64EC = false
     private val preloaderDialog: PreloaderDialog = PreloaderDialog(activity)
 
@@ -139,6 +140,10 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
             setOnDismissListener {
                 AppUtils.hideKeyboard(activity)
                 wallpaperPickerLauncher?.unregister()
+                lifecycleObserver?.let { observer ->
+                    (activity as? LifecycleOwner)?.lifecycle?.removeObserver(observer)
+                    lifecycleObserver = null
+                }
                 onFinished?.run()
             }
         }
@@ -164,11 +169,13 @@ class ContainerSettingsComposeDialog @JvmOverloads constructor(
         }
         dialog.setContentView(composeView)
 
-        (activity as LifecycleOwner).lifecycle.addObserver(object : DefaultLifecycleObserver {
+        lifecycleObserver = object : DefaultLifecycleObserver {
             override fun onDestroy(owner: LifecycleOwner) {
                 if (dialog.isShowing) dialog.dismiss()
             }
-        })
+        }.also { observer ->
+            (activity as LifecycleOwner).lifecycle.addObserver(observer)
+        }
 
         loadContentsAsync()
     }

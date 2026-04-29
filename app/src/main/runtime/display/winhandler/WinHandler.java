@@ -18,8 +18,10 @@ import com.winlator.cmod.runtime.input.controls.ControlsProfile;
 import com.winlator.cmod.runtime.input.controls.ExternalController;
 import com.winlator.cmod.runtime.input.controls.FakeInputWriter;
 import com.winlator.cmod.runtime.input.controls.GamepadState;
+import com.winlator.cmod.runtime.input.ui.InputControlsView;
 import com.winlator.cmod.shared.util.StringUtils;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -59,9 +61,11 @@ public class WinHandler {
   private static final short SERVER_PORT = 7947;
   private static final float GYRO_AXIS_EPSILON = 0.001f;
   private static final float GYRO_TRIGGER_PRESS_THRESHOLD = 0.15f;
-  private final XServerDisplayActivity activity;
+  private final WeakReference<XServerDisplayActivity> activityRef;
+  private final Context appContext;
   private String fakeInputBasePath;
   private final InputManager inputManager;
+  private boolean inputDeviceListenerRegistered;
   private InetAddress localhost;
   private OnGetProcessInfoListener onGetProcessInfoListener;
   private SharedPreferences preferences;
@@ -121,10 +125,14 @@ public class WinHandler {
       };
 
   public WinHandler(XServerDisplayActivity activity) {
-    this.activity = activity;
-    this.inputManager = (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
-    this.inputManager.registerInputDeviceListener(this.inputDeviceListener, null);
-    this.preferences = PreferenceManager.getDefaultSharedPreferences(activity.getBaseContext());
+    this.activityRef = new WeakReference<>(activity);
+    this.appContext = activity.getApplicationContext();
+    this.inputManager = (InputManager) this.appContext.getSystemService(Context.INPUT_SERVICE);
+    if (this.inputManager != null) {
+      this.inputManager.registerInputDeviceListener(this.inputDeviceListener, null);
+      this.inputDeviceListenerRegistered = true;
+    }
+    this.preferences = PreferenceManager.getDefaultSharedPreferences(this.appContext);
     for (int i = 0; i < MAX_CONTROLLERS; i++) {
       String key = "vibration_slot_" + i;
       String legacyKey = "vibrate_slot_" + i;
@@ -136,6 +144,19 @@ public class WinHandler {
     }
     this.globalVibrationEnabled =
         this.preferences.getBoolean(ControllerManager.PREF_VIBRATION_GLOBAL, true);
+  }
+
+  private XServerDisplayActivity getLiveActivity() {
+    XServerDisplayActivity activity = this.activityRef.get();
+    if (activity == null || activity.isDestroyed()) {
+      return null;
+    }
+    return activity;
+  }
+
+  private InputControlsView getInputControlsView() {
+    XServerDisplayActivity activity = getLiveActivity();
+    return activity != null ? activity.getInputControlsView() : null;
   }
 
   public int preAssignConnectedControllers() {
@@ -455,6 +476,7 @@ public class WinHandler {
     synchronized (this.actions) {
       this.running = false;
       this.actions.clear();
+      this.onGetProcessInfoListener = null;
       this.actions.notifyAll();
     }
     this.vibrationRunning = false;
@@ -473,6 +495,7 @@ public class WinHandler {
     if (this.sendExecutor != null) this.sendExecutor.shutdownNow();
     if (this.receiveExecutor != null) this.receiveExecutor.shutdownNow();
     if (this.vibrationExecutor != null) this.vibrationExecutor.shutdownNow();
+    this.activityRef.clear();
   }
 
   private void handleRequest(byte requestCode, int port) {
@@ -480,7 +503,7 @@ public class WinHandler {
       case 1:
         this.initReceived = true;
         this.preferences =
-            PreferenceManager.getDefaultSharedPreferences(this.activity.getBaseContext());
+            PreferenceManager.getDefaultSharedPreferences(this.appContext);
         if (!this.xinputDisabledInitialized) {
           this.xinputDisabled = this.preferences.getBoolean("xinput_toggle", false);
         }
@@ -510,10 +533,13 @@ public class WinHandler {
       case 13:
         short x = this.receiveData.getShort();
         short y = this.receiveData.getShort();
-        XServer xServer = this.activity.getXServer();
+        XServerDisplayActivity activity = getLiveActivity();
+        if (activity == null) return;
+        XServer xServer = activity.getXServer();
+        if (xServer == null || activity.getXServerView() == null) return;
         xServer.pointer.setX(x);
         xServer.pointer.setY(y);
-        this.activity.getXServerView().requestRender();
+        activity.getXServerView().requestRender();
         return;
       default:
         return;
@@ -559,14 +585,17 @@ public class WinHandler {
   }
 
   private void writeVirtualGamepadState(boolean applyGyroOverlay) {
-    ControlsProfile profile = this.activity.getInputControlsView().getProfile();
+    InputControlsView inputControlsView = getInputControlsView();
+    if (inputControlsView == null) {
+      return;
+    }
+    ControlsProfile profile = inputControlsView.getProfile();
     if (profile == null) {
       return;
     }
     GamepadState gamepadState = profile.getGamepadState();
     boolean useVirtualGamepad =
-        profile.isVirtualGamepad()
-            && this.activity.getInputControlsView().isShowTouchscreenControls();
+        profile.isVirtualGamepad() && inputControlsView.isShowTouchscreenControls();
     if (useVirtualGamepad) {
       int slot = assignSlot(-1);
       if (slot >= 0 && this.writers[slot] != null) {
@@ -598,7 +627,11 @@ public class WinHandler {
     if (controller == null) {
       return;
     }
-    ControlsProfile profile = this.activity.getInputControlsView().getProfile();
+    InputControlsView inputControlsView = getInputControlsView();
+    if (inputControlsView == null) {
+      return;
+    }
+    ControlsProfile profile = inputControlsView.getProfile();
     if (profile != null
         && (profileController = profile.getController(controller.getDeviceId())) != null
         && profileController.getControllerBindingCount() > 0) {
@@ -929,7 +962,7 @@ public class WinHandler {
     }
 
     if (slotOwner != null && slotOwner == OSC_DEVICE_ID) {
-      vibrator = (Vibrator) this.activity.getSystemService(Context.VIBRATOR_SERVICE);
+      vibrator = (Vibrator) this.appContext.getSystemService(Context.VIBRATOR_SERVICE);
     } else if (slotOwner != null) {
       for (Map.Entry<Integer, Integer> entry : this.deviceToSlot.entrySet()) {
         if (entry.getValue() != slot || entry.getKey() == OSC_DEVICE_ID) {
@@ -949,7 +982,7 @@ public class WinHandler {
       if ((vibrator == null || !vibrator.hasVibrator())
           && !this.deviceToSlot.containsKey(OSC_DEVICE_ID)
           && (this.fallbackSlot == -1 || this.fallbackSlot == slot)) {
-        vibrator = (Vibrator) this.activity.getSystemService(Context.VIBRATOR_SERVICE);
+        vibrator = (Vibrator) this.appContext.getSystemService(Context.VIBRATOR_SERVICE);
         this.fallbackSlot = slot;
       }
     }
@@ -1002,8 +1035,13 @@ public class WinHandler {
   }
 
   public void closeFakeInputWriter() {
-    if (this.inputManager != null && this.inputDeviceListener != null) {
+    if (this.inputManager != null && this.inputDeviceListenerRegistered) {
       this.inputManager.unregisterInputDeviceListener(this.inputDeviceListener);
+      this.inputDeviceListenerRegistered = false;
+    }
+    Set<ExternalController> registeredControllers = new HashSet<>(this.controllers.values());
+    for (ExternalController controller : registeredControllers) {
+      controller.unregisterListener();
     }
     for (int i = 0; i < MAX_CONTROLLERS; i++) {
       if (this.writers[i] != null) {
@@ -1058,7 +1096,7 @@ public class WinHandler {
 
     ExternalController controller = ExternalController.getController(deviceId);
     if (controller != null) {
-      controller.setContext(activity);
+      controller.setContext(this.appContext);
       this.controllers.put(deviceId, controller);
     }
     return controller;
@@ -1267,7 +1305,10 @@ public class WinHandler {
     
     // Fallback: prefer physical controller if connected, otherwise virtual
     if (getPreferredGyroController() != null) return GAMEPAD_SOURCE_CONTROLLER;
-    if (canUseVirtualGamepad() || this.activity.getInputControlsView().getProfile() != null) return GAMEPAD_SOURCE_VIRTUAL;
+    InputControlsView inputControlsView = getInputControlsView();
+    if (canUseVirtualGamepad() || (inputControlsView != null && inputControlsView.getProfile() != null)) {
+      return GAMEPAD_SOURCE_VIRTUAL;
+    }
     
     return GAMEPAD_SOURCE_NONE;
   }
@@ -1293,10 +1334,14 @@ public class WinHandler {
   }
 
   private boolean canUseVirtualGamepad() {
-    ControlsProfile profile = this.activity.getInputControlsView().getProfile();
+    InputControlsView inputControlsView = getInputControlsView();
+    if (inputControlsView == null) {
+      return false;
+    }
+    ControlsProfile profile = inputControlsView.getProfile();
     return profile != null
         && profile.isVirtualGamepad()
-        && this.activity.getInputControlsView().isShowTouchscreenControls();
+        && inputControlsView.isShowTouchscreenControls();
   }
 
   private void setLastGamepadSource(int source, ExternalController controller) {
@@ -1352,7 +1397,8 @@ public class WinHandler {
   }
 
   private GamepadState getTargetGamepadState(int source, ExternalController controller) {
-    ControlsProfile profile = this.activity.getInputControlsView().getProfile();
+    InputControlsView inputControlsView = getInputControlsView();
+    ControlsProfile profile = inputControlsView != null ? inputControlsView.getProfile() : null;
     if (source == GAMEPAD_SOURCE_VIRTUAL) {
       return profile != null ? profile.getGamepadState() : null;
     }
